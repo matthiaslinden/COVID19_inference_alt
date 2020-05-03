@@ -61,7 +61,7 @@ def SIR_model(N, imported_t,lambda_t, median_incubation,sigma_incubation,l=32):
     lambda_t = tt.as_tensor_variable(lambda_t)
     imported_t = tt.as_tensor_variable(imported_t)
 
-    def imported_day_acc(lambda_at_t,imported_at_t,infected,N_at_t,beta,N):
+    def new_day(lambda_at_t,imported_at_t,infected,N_at_t,beta,N):
         f = N_at_t / N
     #    f = 1
         new = imported_at_t + theano.dot(infected,beta) * lambda_at_t * f
@@ -73,7 +73,7 @@ def SIR_model(N, imported_t,lambda_t, median_incubation,sigma_incubation,l=32):
         return new,infected,N_at_t
     
     outputs_info = [None,np.zeros(l),N]
-    infected_t,updates = theano.scan(fn=imported_day_acc,
+    infected_t,updates = theano.scan(fn=new_day,
                                      sequences=[lambda_t,imported_t],
                                      outputs_info=outputs_info,
                                      non_sequences=[beta,N],
