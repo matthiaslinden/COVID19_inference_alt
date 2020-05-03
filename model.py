@@ -238,7 +238,7 @@ trace = pm.sample(model=model,init="advi" , draws=200,cores=2,chains=2,tune=300)
 if trace != None:
     d = datetime.datetime.now()
     ds = "%02d%02d%02d"%(d.hour,d.minute,d.second)
-    fn = "trace"+ds+".dat"
+    fn = "traces/trace"+ds+".dat"
 
     with open(fn,"wb+") as f:
         pickle.dump(trace,f)

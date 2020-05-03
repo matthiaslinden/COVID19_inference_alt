@@ -34,10 +34,10 @@ def conv_offset(inp,filt,amplitude=1,offset=0):
 
 ## Results
 <p float="left">
-	<img src="EstEpiCurve.svg" height=500>
+	<img src="plots/EstEpiCurve.svg" height=500>
 </p>
 
 
 <p float="left">
-    <img src="EstEpiCurve_Variables.svg" height=600>
+    <img src="plots/EstEpiCurve_Variables.svg" height=600>
 </p>
