@@ -231,28 +231,20 @@ pr_d = {}
 pr_d["pr_beta_sigma_obs"] = 10
 pr_d["pr_mean_median_incubation"] = 4.
 pr_d["sigma_incubation"] = 0.418
-pr_d["pr_sigma_random_walk"] = 1 #0.05
+pr_d["pr_sigma_random_walk"] = 0.05
 pr_d["pr_median_lambda_0"] = 4
 pr_d["pr_sigma_lambda_0"] = .5
 
 # Data
 front = [-1]*4
-front = []
 epi_curve = front+[7, 9, 8, 10, 34, 19, 26, 46, 65, 102, 148, 158, 198, 179, 198, 275, 261, 356, 370, 590, 753, 1015, 1534, 1964, 2464, 2702, 3305, 3328, 3464, 4589, 3833, 3969, 3414, 4002, 3253, 2702, 3860, 2867, 3109, 2770, 2853, 2668, 2153, 3037, 2241, 2645, 2371, 2411, 1904, 1704, 2190, 1856, 1720, 1649, 1367, 1166, 1190, 1136, 1169, 1113, 976, 942, 829, 711, 898, 700, 675, 670, 605, 496, 436, 595, 417, 388, 398, 284, 260, 269, 285, 190, 116, 41, 13]#+[-1]*7
-
-#epi_curve = epi_curve[4:-10]
 
 epi_curve = np.asarray(epi_curve,dtype=np.float64)
 m_epi_curve = ma.masked_less_equal(epi_curve,0.,copy=True)
 
-lambda_t = np.array([3]*10+[4]*15+[.9]*30+[.8]*20+[1.05]*20,dtype=np.float64)[:len(epi_curve)]
 
 initial = [7,9,8,10,5,0,4,13]+[1]*(len(epi_curve)-8)
-#intital = initial[4:-10]
 imported_cases = np.asarray(initial,dtype=np.float64)
-
-print(imported_cases)
-print(m_epi_curve)
 
 startdate = datetime.date(2020,2,16)-datetime.timedelta(len(front))
 mi = Modelinfo(startdate,epi_curve.shape[0])
@@ -279,9 +271,10 @@ with pm.Model() as model:
     # Weekend Factor
     f_weekend = 1.
     f_weekend = pm.Lognormal(name="f_weekend",mu=tt.log(f_weekend),sigma=.1)
-    flt = np.array([.1,.2,.8,.2,.1],dtype=np.float64)
-    lambda_t,week_mask = WeeklyRandomWalkWeekend("lambda_t",mi.length,initial_lambda,f_weekend,flt=flt,offset=mi.weekoffset)    
-    
+    flt = np.array([.8,.3,.2,.1],dtype=np.float64)
+    w_offset = mi.weekoffset
+    lambda_t,week_mask = WeeklyRandomWalkWeekend("lambda_t",mi.length,initial_lambda,f_weekend,flt=flt,offset=w_offset)
+    pm.Deterministic("lambda_t",lambda_t)
     
     median_incubation,sigma_incubation = 4.,.466
     # median_incubation = pm.Lognormal(
@@ -293,10 +286,13 @@ with pm.Model() as model:
     # Core Function
     infected_t,infected_v,N_t = SEIR_model(86e6,imported_cases[:mi.length],lambda_t[:mi.length],median_incubation,sigma_incubation,l=32)
     onset_of_illness_t = est_deaths(infected_t,median=(4),sigma=.3,factor=1.,l=16)[:mi.length]
+    pm.Deterministic("infected_t",infected_t)
+    pm.Deterministic("onset_of_illness_t",onset_of_illness_t)
     
  #   f_wtrans = 0.15
     f_wtrans = pm.Uniform(name="w_trans",lower=0,upper=.5)
     reported_onset_of_illness_t = TransferWeekendReported(onset_of_illness_t,f_wtrans,week_mask)
+    pm.Deterministic("reported_onset_of_illness_t",reported_onset_of_illness_t)
     
     
     sigma_onset_obs = pm.HalfCauchy( name="sigma_onset_obs", beta=10 )
@@ -307,12 +303,21 @@ with pm.Model() as model:
             sigma=tt.abs_(reported_onset_of_illness_t + 1) ** 0.5 * sigma_onset_obs,  # +1 and tt.abs to avoid nans
             observed=m_epi_curve
        )
+       
     
-    pm.Deterministic("onset_of_illness_t",onset_of_illness_t)
-    pm.Deterministic("reported_onset_of_illness_t",reported_onset_of_illness_t)
-    pm.Deterministic("lambda_t",lambda_t)
-    pm.Deterministic("infected_t",infected_t)
+    delay_ratio_t = [.3]*20+[.4]*10+[.5]*10+[.6]*10+[.7]*20+[.8]*10+[.7]*20
+    delay_m1,delay_s1,delay_m2,delay_s2 = 8,.4,20,.5
+    reported_t,per_day_curves = reportDelayDistFunc(reported_onset_of_illness_t[:mi.length],
+                                                                delay_m1,delay_s1,
+                                                                delay_m2,delay_s2, delay_ratio_t[:mi.length],n=128)
+    #    pm.Deterministic("delayed_distr",delay_distr)
+    pm.Deterministic("reported_t",reported_t)
     
+    #epi_curve_tc = epi_curve_t[4:num_days_sim+4]
+    per_day_curves_t = per_day_curves[:mi.length,(mi.length-67):mi.length],
+    per_day_curves_s = tt.cumsum(per_day_curves_t[0],axis=1 )
+    pm.Deterministic("per_day_curve_t",per_day_curves)
+    pm.Deterministic("per_day_curve_s",per_day_curves_s)
     
         
 #init='advi'
