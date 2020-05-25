@@ -12,7 +12,7 @@ import pymc3 as pm
 
 import pickle
 import datetime
-from ModelInfo import Modelinfo,Datasets
+from ModelInfo import ModelParameters,Datasets,SamplerParameters,Priors,ModelParameter
 
 import matplotlib.pyplot as plt
 
@@ -199,6 +199,8 @@ def tt_lognormal(x, mu, sigma):
     return distr / (tt.sum(distr, axis=0) + 1e-12)
 
 def GenInit(l,a1,a2,t1=10,t2=27,offset=8):
+    # Generate foreign origin initialization from two lognormal distributions: Italy and Austria
+    # not used at the moment.
     x = tt.arange(l)
     d1 = tt_lognormal(x,tt.log(t1),.8)*2350 #.4 / 23500
     d2 = tt_lognormal(x,tt.log(t2),.25)*12500
@@ -238,7 +240,7 @@ def GenInit(l,a1,a2,t1=10,t2=27,offset=8):
 #     return ds,mcc,dist
 
 def reportDelayDistFunc(cases,mu1,sig1,mu2,sig2,r,n):
-    """ from onset of illnesses 'cases', generate a time series for every day of infection representing when the cases are reported. """
+    """ from onset of illnesses 'cases', generate a time series for every day of onset of illness representing when the cases are reported. """
     m1 = tt.cast(mu1,'float64')
     s1 = tt.cast(sig1,'float64')
     m2 = tt.cast(mu2,'float64')
@@ -267,6 +269,7 @@ def reportDelayDistFunc(cases,mu1,sig1,mu2,sig2,r,n):
     return cfo#
 
 def conv_offset(inp,filt,amplitude=1.):
+    # Ok - minus the offset...
 #    offset = tt.cast(offset,'int64')
     amplitude = tt.cast(amplitude,'float64')
     amplitude = tt.clip(amplitude,1e-12,1e9) # Limit to prevent NANs
@@ -305,7 +308,7 @@ def DelayLognormal(infected_t,median,sigma,factor,l=40):
 #     beta = tt_lognormal(tt.arange(l*2),tt.log(median),sigma)
 #     return conv_offset(infected_t,beta,factor,offset)
 
-def WeeklyRandomWalk(name,n,initial,flt=np.array([1.,1.,1.,1.,1.,1.,1.],dtype=np.float64),sigma=.05,offset=0,shorten=6):
+def WeeklyRandomWalk(name,n,initial,flt=np.array([1.,1.,1.,1.,1.,1.,1.],dtype=np.float64),sigma=.05,offset=0,shorten=4):
     awl = np.array([0,1,1,1,1,1,1])
     additional_week = awl[offset%7]
   #  offset = tt.cast(offset,'int64')
@@ -393,10 +396,11 @@ def WeeklyRandomWalkWeekend(name,n,initial,wfactor,flt=np.array([.05,.1,.7,.1,.0
    
     return daily_walk,week_mask
 
-def DailyRandomWalkWeekend(name,n,initial,wfactor,flt=np.array([.05,.1,.7,.1,.05],dtype=np.float64),sigma=.01,offset=0):
+def DailyRandomWalkWeekend(name,n,initial,sigma,wfactor,offset=0):
     
     rw_list = []
-    rw_list.append(initial)
+    rw_list.append(tt.log(initial))
+#    rw_list.append(initial)
     # Generate "stepsize"
     sigma_random_walk = pm.HalfNormal(name=name+"_sigma_random_walk", sigma=sigma)
     random_walk = pm.distributions.timeseries.GaussianRandomWalk(
@@ -408,13 +412,14 @@ def DailyRandomWalkWeekend(name,n,initial,wfactor,flt=np.array([.05,.1,.7,.1,.05
     # Generate Matrix 7x(#weeks) shape, which was weekly values dublicated over 7 entries
     awl = np.array([0,1,1,1,1,1,1])
     additional_week = awl[offset%7]   # if firstday == monday, no additional week is needed
-    weeks = n//7+additional_week    
+    weeks = n//7+additional_week 
    
     # Generate 7x(n days) maxtrix marking day of week
     d_oeye = tt.roll(tt.eye(7),-offset,axis=1)
     week_mask = tt.tile(d_oeye,weeks)[:,:n]
     
-    daily_walk = rw_list[0]+random_walk
+    daily_walk = tt.exp(rw_list[0]+random_walk)
+#    daily_walk = rw_list[0]+random_walk
     
     # Create Mask with wfactor at the weekends otherwiese 1, then multiply with daily_walk
     weekend_m = week_mask[5] + week_mask[6]   # Saturday + Sunday
@@ -423,121 +428,132 @@ def DailyRandomWalkWeekend(name,n,initial,wfactor,flt=np.array([.05,.1,.7,.1,.05
    
     return daily_walk,week_mask
 
-def GenChangepoints():
-    change_points = [
-        # mild distancing
-        dict(
-            pr_mean_date_transient=datetime.datetime(2020, 3, 9)
-            # account for new implementation where transients_day is centered, not begin
-            + datetime.timedelta(days=1.5),
-            pr_median_transient_len=3,
-            pr_sigma_transient_len=0.3,
-            pr_sigma_date_transient=3,
-            pr_median_lambda=0.2,
-            pr_sigma_lambda=0.5,
-        ),
-        # strong distancing
-        dict(
-            pr_mean_date_transient=datetime.datetime(2020, 3, 16)
-            + datetime.timedelta(days=1.5),
-            pr_median_transient_len=3,
-            pr_sigma_transient_len=0.3,
-            pr_sigma_date_transient=1,
-            pr_median_lambda=1 / 8,
-            pr_sigma_lambda=0.5,
-        ),
-        # contact ban
-        dict(
-            pr_mean_date_transient=datetime.datetime(2020, 3, 23)
-            + datetime.timedelta(days=1.5),
-            pr_median_transient_len=3,
-            pr_sigma_transient_len=0.3,
-            pr_sigma_date_transient=1,
-            pr_median_lambda=1 / 16,
-            pr_sigma_lambda=0.5,
-        ),
-        # opening
-        dict(
-            pr_mean_date_transient=datetime.datetime(2020, 4, 20)
-            + datetime.timedelta(days=1.5),
-            pr_median_transient_len=3,
-            pr_sigma_transient_len=0.3,
-            pr_sigma_date_transient=1,
-            pr_median_lambda=1 / 8,
-            pr_sigma_lambda=0.5,
-        ),
-        # opening 2
-        dict(
-            pr_mean_date_transient=datetime.datetime(2020, 5, 4)
-            + datetime.timedelta(days=1.5),
-            pr_median_transient_len=3,
-            pr_sigma_transient_len=0.3,
-            pr_sigma_date_transient=1,
-            pr_median_lambda=1 / 8,
-            pr_sigma_lambda=0.5,
-        ),
-    ]
-    return lambda_t_with_sigmoids(change_points,)
+# def GenChangepoints():
+#     change_points = [
+#         # mild distancing
+#         dict(
+#             pr_mean_date_transient=datetime.datetime(2020, 3, 9)
+#             # account for new implementation where transients_day is centered, not begin
+#             + datetime.timedelta(days=1.5),
+#             pr_median_transient_len=3,
+#             pr_sigma_transient_len=0.3,
+#             pr_sigma_date_transient=3,
+#             pr_median_lambda=0.2,
+#             pr_sigma_lambda=0.5,
+#         ),
+#         # strong distancing
+#         dict(
+#             pr_mean_date_transient=datetime.datetime(2020, 3, 16)
+#             + datetime.timedelta(days=1.5),
+#             pr_median_transient_len=3,
+#             pr_sigma_transient_len=0.3,
+#             pr_sigma_date_transient=1,
+#             pr_median_lambda=1 / 8,
+#             pr_sigma_lambda=0.5,
+#         ),
+#         # contact ban
+#         dict(
+#             pr_mean_date_transient=datetime.datetime(2020, 3, 23)
+#             + datetime.timedelta(days=1.5),
+#             pr_median_transient_len=3,
+#             pr_sigma_transient_len=0.3,
+#             pr_sigma_date_transient=1,
+#             pr_median_lambda=1 / 16,
+#             pr_sigma_lambda=0.5,
+#         ),
+#         # opening
+#         dict(
+#             pr_mean_date_transient=datetime.datetime(2020, 4, 20)
+#             + datetime.timedelta(days=1.5),
+#             pr_median_transient_len=3,
+#             pr_sigma_transient_len=0.3,
+#             pr_sigma_date_transient=1,
+#             pr_median_lambda=1 / 8,
+#             pr_sigma_lambda=0.5,
+#         ),
+#         # opening 2
+#         dict(
+#             pr_mean_date_transient=datetime.datetime(2020, 5, 4)
+#             + datetime.timedelta(days=1.5),
+#             pr_median_transient_len=3,
+#             pr_sigma_transient_len=0.3,
+#             pr_sigma_date_transient=1,
+#             pr_median_lambda=1 / 8,
+#             pr_sigma_lambda=0.5,
+#         ),
+#     ]
+#     return lambda_t_with_sigmoids(change_points,)
 
-def TransferWeekendReported(r_t,f,mask):
-    """ Moves f* value at r_t to r_t+2 / r_t+1 on saturdays and sundays """
-    sat = r_t * mask[5] * f # Trnasfer cases
-    sut = r_t * mask[6] * f
-    r_t = r_t - sat - sut   # Substract the transfered cases
+def TransferWeekendReported(I_t,f,mask):
+    """ Moves f* value at I_t to I_t+2 / I_t+1 on saturdays and sundays """
+    sat = I_t * mask[5] * f # Tranasfer monday cases
+    sut = I_t * mask[6] * f
+    I_t = I_t - sat - sut   # Substract the transfered cases
     satr = tt.roll(sat,2)   # Shift the transfered cases
     satr = tt.set_subtensor(satr[:2],0)
     sutr = tt.roll(sut,1)
     sutr = tt.set_subtensor(sutr[:1],0)
-    r_t = r_t + satr + sutr # Add up
-    return r_t
+    I_t = I_t + satr + sutr # Add up
+    return I_t
     
-def DelayDaily(data,max_delay,week_mask):
+def DelayDaily(data,max_delay,week_mask,mu=.01,sigma=.03):
     """ Delay Cases from one day to the next by weekdayfactor """
-#    factor = pm.TruncatedNormal(name="d_factor",mu=.1,sigma=.1,lower=-1,upper=1,shape=(max_delay,7,))
-    factor = pm.TruncatedNormal(name="d_factor",mu=.01,sigma=.05,lower=0,upper=1,shape=(max_delay,7,))
+    # Checked the DelayDaily effect manually, aligns properly with weekdays, no more overspill at front.
     
+#    factor = pm.TruncatedNormal(name="d_factor",mu=.1,sigma=.1,lower=-1,upper=1,shape=(max_delay,7,))
+    factor = pm.TruncatedNormal(name="d_factor",mu=mu,sigma=sigma,lower=0,upper=1,shape=(max_delay,7,))
+    
+#    factor=np.array([[.8,0,0,0,0,0,0],[0,0,0,0,0,0,.8]],dtype=np.float64)
+    
+    cuml = tt.alloc(0,max_delay,week_mask.shape[1],data.shape[1])
     
     t = tt.dot(factor[0],week_mask)
     tv = data*t
     d_sub = data-tv
-    tvr = tt.roll(tv,1)
-    tvr = tt.set_subtensor(tvr[:1],0)
+    tvr = tt.roll(tv,1,axis=1)  
+    tvr = tt.set_subtensor(tvr[:,:1],0) 
+  #  cuml = tt.set_subtensor(cuml[0],0)
     d_add = d_sub + tvr
     
     if max_delay > 1:
-        data = d_add
+        data = d_add#d_sub
         t = tt.dot(factor[1],week_mask)
         tv = data*t
         d_sub = data-tv
-        tvr = tt.roll(tv,2)
-        tvr = tt.set_subtensor(tvr[:2],0)
-        d_add = d_sub + tvr
+        tvr = tt.roll(tv,2,axis=1)
+        tvr = tt.set_subtensor(tvr[:,:2],0)
+     #   cuml = tt.set_subtensor(cuml[1],0)
+        d_add = d_sub +tvr
+
     if max_delay > 2:
-        data = d_add
+        data = d_add#d_sub
         t = tt.dot(factor[2],week_mask)
         tv = data*t
         d_sub = data-tv
-        tvr = tt.roll(tv,3)
-        tvr = tt.set_subtensor(tvr[:3],0)
+        tvr = tt.roll(tv,3,axis=1)
+        tvr = tt.set_subtensor(tvr[:,:3],0)
+#        cuml = tt.set_subtensor(cuml[2],0)
         d_add = d_sub + tvr
+        
+#    d_add = d_sub + tt.sum(cuml,axis=0)
     
     return d_add
 
-def SEIR_model(N, imported_t,lambda_t, median_incubation,sigma_incubation,l=32):
+def SEIR_model(N, imported_t,Reff_t, median_incubation,sigma_incubation,l=32):
     N = tt.cast(N,'float64')
     beta = tt_lognormal(tt.arange(l), tt.log(median_incubation), sigma_incubation)
     
-    # Dirty hack to prevent nan
+    # Dirty hack to prevent nan - seems not needed if priors are better
  #   beta = tt.alloc(0,l)
   #  beta = tt.set_subtensor(beta[tt.clip(tt.cast(median_incubation,'int32'),1,l-2)],1)
      
-    lambda_t = tt.as_tensor_variable(lambda_t)
+    Reff_t = tt.as_tensor_variable(Reff_t)
     imported_t = tt.as_tensor_variable(imported_t)
 
-    def new_day(lambda_at_t,imported_at_t,infected,E_t,beta,N):
+    def new_day(Reff_at_t,imported_at_t,infected,E_t,beta,N):
         f = E_t / N
      #   f = 1
-        new = imported_at_t + theano.dot(infected,beta) * lambda_at_t * f
+        new = imported_at_t + theano.dot(infected,beta) * Reff_at_t * f
         new = tt.clip(new,0,N)
      
         infected = tt.roll(infected,1,0)
@@ -548,7 +564,7 @@ def SEIR_model(N, imported_t,lambda_t, median_incubation,sigma_incubation,l=32):
     
     outputs_info = [None,np.zeros(l),N]
     infected_t,updates = theano.scan(fn=new_day,
-                                     sequences=[lambda_t,imported_t],
+                                     sequences=[Reff_t,imported_t],
                                      outputs_info=outputs_info,
                                      non_sequences=[beta,N],
                                      profile=False)
@@ -556,247 +572,265 @@ def SEIR_model(N, imported_t,lambda_t, median_incubation,sigma_incubation,l=32):
     return infected_t
 
 
-pr_d = {}
-#priors_dict[""] = 
-pr_d["pr_beta_sigma_obs"] = 10
-pr_d["pr_mean_median_incubation"] = 4.
-pr_d["sigma_incubation"] = 0.418
-pr_d["pr_sigma_random_walk"] = 0.005 #0.05
-pr_d["pr_median_lambda_0"] = 3.0
-pr_d["pr_sigma_lambda_0"] = .5
+# - - - - - - - - - - - - - - Run Model(s) - - - - - - - - - - - - - - - #
 
-# Data
-front = [-1]*4
-epi_curve = front+[7, 9, 9, 10, 34, 19, 27, 45, 65, 101, 148, 159, 202, 184, 204, 278, 267, 363, 376, 599, 756, 1029, 1557, 1999, 2495, 2754, 3356, 3382, 3528, 4680, 3907, 4038, 3469, 4072, 3288, 2739, 3928, 2912, 3179, 2804, 2897, 2721, 2190, 3117, 2281, 2700, 2414, 2463, 1956, 1736, 2239, 1887, 1761, 1685, 1406, 1190, 1222, 1157, 1187, 1138, 1000, 960, 847, 727, 928, 719, 690, 698, 621, 524, 463, 628, 462, 419, 467, 363, 340, 352, 430, 348, 302, 271, 209, 165, 116, 126, 63, 16, 3, 0,0,0,0]
-
-epi_curve = np.asarray(epi_curve,dtype=np.float64)
-m_epi_curve = ma.masked_less_equal(epi_curve,0.,copy=True)
-
-
-initial = [7,9,8,10,5,0,4,13]+[0]*(len(epi_curve)-8)
-imported_cases = np.asarray(initial,dtype=np.float64)
-
-startdate = datetime.date(2020,2,16)-datetime.timedelta(len(front))
-mi = Modelinfo(startdate,epi_curve.shape[0])
-ds = Datasets()
-ds.AddDataSeries("epi_curve",m_epi_curve,startdate)
-ds.AddDataSeries("initial",imported_cases,startdate)
-print(mi)
-
-
-hospital = [-1]*17+[-1]*20+[379,352,529,581,661,432,566,719,759,834,839,748,747,500,676,751,791,789,604,468,425,415,644,705,645,660,428,310,405,569,500,490,410,286,160,296,360,379,470,192,132,130]+[-1]*5
-hospital_begin = 37
-hospital = ma.masked_less(hospital,0.,copy=True)[hospital_begin:]
-
-icu_deaths = [-1]*17+[-1]*36+[93,154,0,131,88,66,228,255,305,123,50,59,108,91,115,39,22,29,24,68,69,52,40,46,85]
-icu_deaths_begin = 17+30
-icu_deaths = ma.masked_less(icu_deaths,0.,copy=True)[icu_deaths_begin:]
-
-deaths = [-1]*(17+4)+[-1,-1,-1,-1,-1,-1,0,1,2,0,3,4,0,0,0,8,11,16,8,31,28,35,49,55,72,64,66,128,149,140,145,141,184,92,173,254,246,266,171,129,126,170,285,315,299,242,184,110,194,281,215,227,179,140,110,163,202,173,193,94,74,43,139,165,123,147]+[-1]*8
-deaths = np.asarray(deaths,dtype=np.float64)
-deaths = ma.masked_less(deaths,0.,copy=True)
-
-reported = [-1]*4+[66,138,239,156,107,237,157,271,802,693,733,400,1817,1144,1036,2807,2958,2705,1948,4062,4764,4118,4954,5780,6294,3965,4751,4615,5453,6156,6174,6082,5936,3677,3834,4003,4974,5323,4133,2821,2537,2082,2486,2866,3380,3609,2458,1775,1785,2237,2352,2337,2055,1737,1018,1144,1304,1478,1639,945,793,679,685,947]
-reported = ma.masked_less(reported,0.,copy=True)
-
-print("Len of inputs",len(deaths),len(epi_curve),len(imported_cases),len(hospital),print(icu_deaths),len(reported))
-
-#num_days_sim = min(len(epi_curve),len(imported_cases))
 with open("data/onset_by_date_missing.pickle","rb") as f:
     onsets_per_date = pickle.load(f)
-    print(onsets_per_date.shape)
-    print(onsets_per_date[0])
-    # date per line
-    # days with report 
+    print("onsets",onsets_per_date.shape)
+
     
 with open("data/onsets_by_date_diff.pickle","rb") as f:
     onsets_per_date_diff = pickle.load(f)
-    print("Diff",onsets_per_date_diff.shape)
+    print("onsets_diff",onsets_per_date_diff.shape)
 
+deaths = [1, 2, 1, 1, 4, 2, 3, 4, 11, 12, 12, 21, 39, 24, 41, 40, 65, 75, 92, 102, 107, 115, 170, 161, 161, 201, 195, 221, 234, 241, 248, 255, 252, 235, 239, 235, 237, 242, 220, 234, 231, 183, 205, 205, 168, 189, 149, 158, 123, 140, 125, 122, 124, 118, 100, 75, 91, 77, 85, 75, 57, 55, 58, 60, 60, 40, 45, 48, 40, 24, 29, 34, 30, 33, 20, 11, 3]
 
-trace = None
-with pm.Model() as model:
+deaths = np.asarray(deaths,dtype=np.float64)
+death_start = datetime.date(2020,3,8)
 
-    # Known working parameter Set: 1,.1 1,.1 t1=10,t2=24 offset=7 --> 2.53+/-0.050 / 0.99+/-0.070 
-    # 6,24 o7 --> 0.97+/-0.021 / 0.83+/-0.066
-    # a1 = pm.Lognormal(name="initial_a1",mu=1,sigma=.1)
-    # a2 = pm.HalfNormal(name="initial_a2",sigma=.3)
-    # t2 = pm.Lognormal(name="initial_t2",mu=tt.log(20),sigma=.1)
-    # imported_cases = GenInit(num_days_sim,a1,a2,t2=t2,offset=5)
-    # pm.Deterministic("initial_t",imported_cases)
-    
-     
-    initial_lambda = pr_d["pr_median_lambda_0"]  
-    # initial_lambda = pm.Lognormal(
-  #               name="lambda_0",
-  #               mu=np.log(pr_d["pr_median_lambda_0"]),
-  #               sigma=pr_d["pr_sigma_lambda_0"],
-  #          )
-#    flt = np.array([.2,.7,.7,1,.7,.7,.2],dtype=np.float64)
-    # flt = np.array([1,.5,.2])
-    flt = np.array([.1,1.,.1],dtype=np.float64)
-    f_weekend = 1.
-    f_weekend = pm.Lognormal(name="f_weekend",mu=tt.log(f_weekend),sigma=.1)
-    lambda_t,week_mask = DailyRandomWalkWeekend("lambda_t",mi.length,initial_lambda,f_weekend,flt=flt,offset=mi.weekoffset)
-    pm.Deterministic("lambda_t",lambda_t)
-    
-    initial_delay_ratio = pm.Uniform("delay_ratio_0",lower=.01,upper=.99)
-#    delay_ratio_t = WeeklyRandomWalk("delay_ratio_t",num_days_sim,initial_delay_ratio,sigma=.01,flt=np.array([1,1,1,1,1,1,1],dtype=np.float64))
-    delay_ratio_t = WeeklyRandomWalk("delay_ratio_t",mi.length,initial_delay_ratio,sigma=.01,flt=np.array([.5,1,1,1,1,1,.5],dtype=np.float64),offset=mi.weekoffset)
-    
-    delay_ratio_t = tt.clip(delay_ratio_t,.01,.99)
-    pm.Deterministic("delay_ratio_t",delay_ratio_t)
-    
-    
-    #
- #   s_import = 1.
- #   s_import = pm.Lognormal(name="median_imported_factor",mu=tt.log(1.),sigma=.05)
-    
-    # Core Function
-#    f_unknown = pm.Lognormal(name="f_unknown",mu=tt.log(1.1),sigma=.1)
-    median_infectious,sigma_infectious = 4.,.466
-    median_infectious = pm.Lognormal(name = "median_infectious",mu = tt.log(median_infectious),sigma = .1)
-    infected_t,infected_v,N_t = SEIR_model(86e6,imported_cases[:mi.length],lambda_t[:mi.length],median_infectious,sigma_infectious,l=32)
-    pm.Deterministic("infected_t",infected_t)
-    
-    
-    median_incubation,sigma_incubation = 4.,.466
-    median_incubation = pm.Lognormal(name = "median_incubation",mu = tt.log(median_incubation),sigma = 0.1)
-    onset_of_illness_t = DelayLognormal(infected_t,median=median_incubation,sigma=sigma_incubation,factor=1.,l=32)[:mi.length]
-    pm.Deterministic("onset_of_illness_t",onset_of_illness_t)
-    
-#    f_wtrans = 0.15
-    f_wtrans = pm.HalfCauchy(name="w_trans",beta=.3)
-    reported_onset_of_illness_t = TransferWeekendReported(onset_of_illness_t,f_wtrans,week_mask)
-    pm.Deterministic("reported_onset_of_illness_t",reported_onset_of_illness_t)
-    
-    delay_m1,delay_s1,delay_m2,delay_s2 = 8,.4,20,.5
-    delay_m1 = pm.Lognormal(name="delay_m1",mu=tt.log(delay_m1),sigma=.2)
-    delay_s1 = pm.HalfNormal(name="delay_s1",sigma=delay_s1)
-#    delay_m2 = pm.Lognormal(name="delay_m2",mu=tt.log(delay_m2),sigma=.5)
-    delay_s2 = pm.HalfNormal(name="delay_s2",sigma=delay_s2)
+reported_start = datetime.date(2020,3,4)
+reported = [66,138,239,156,107,237,157,271,802,693,733,400,1817,1144,1036,2807,2958,2705,1948,4062,4764,4118,4954,5780,6294,3965,4751,4615,5453,6156,6174,6082,5936,3677,3834,4003,4974,5323,4133,2821,2537,2082,2486,2866,3380,3609,2458,1775,1785,2237,2352,2337,2055,1737,1018,1144,1304,1478,1639,945,793,679,685,947,1284,1209,1251,667,357,933,798,933,913,620]
 
+# ID
+collection_id = datetime.timestamp()
+collection_id_str = "%04d"%collection_id%10000
+# R_eff 0.002 is too strict, 0.005 also distortes infectious, 0.01 works good
+
+#for R_eff_rw_s in [0.1,.05,.02,.01,.005]:
+for R_eff_rw_s in [.1,.05,.02,.01,.005]:
+   
+    # Priors and Parameters
+    p = []
+    p.append( SamplerParameters(cores=2,chains=2,tune=200,draws=200) )
+    p.append( ModelParameter("Collection",{"runID":collection_id}) )
+    p.append( Priors("R_eff",{"0":(2.7,False),"0_s":(.3,False),"rw_s":(R_eff_rw_s,False)}) )  # rw_s : Random walk sigma
     
-    per_day_curves_t = reportDelayDistFunc(reported_onset_of_illness_t[:mi.length],
-                                                            delay_m1,delay_s1,
-                                                            delay_m2,delay_s2, delay_ratio_t,n=128)
+    p.append( Priors("W1",{"factor":(1.,False),"factor_s":(.05,False)}) )   # Weekend-factor for R_eff
+    p.append( Priors("W2",{"0":(.08,False),"beta":(.3,True)}) )               # sat/sun --> monday shift of reported onsets
+    p.append( Priors("W3",{"n":(2,False),"mu":(.01,False),"sigma":(.01,False)}) )   # per weekday delay of reporting by n days 
+    p.append( Priors("reporting_delay",{"mu1":(8,True),"s1":(.4,True),"mu2":(21,False),"s2":(.5,True)}) )
     
+    p.append( Priors("delay_ratio",{"0":(.3,False),"0_s":(.1,False),"sigma":(0.01,False),"const_end":(5,False),"flt":(np.array([.5,1,1,1,1,1,.5],dtype=np.float64),False)})) # Delay Ratio and filter
+    p.append( Priors("incubation",{"mu":(4,False),"mu_s":(.1,False),"sigma":(.418,True),"sigma_s":(.1,False)}) )
+    p.append( Priors("infectious",{"mu":(4.5,False),"mu_s":(.1,False),"sigma":(.446,True),"sigma_s":(.1,False)}) )
+    p.append( Priors("deaths",{"mu":(23,True),"mu_s":(1.,False),"sigma":(.5,True),"sigma_s":(.1,False),"factor":(.04,True),"factor_s":(.01,False)}) )
     
-    publishing_start = datetime.date(2020,3,4)  # Startdate of epicurves
+#    p.append( Priors("sigma_obs",{"published_diff":(20,True,),"published":(20,True,),"deaths":(10,True)}) )  # This time around true if observation is fitted
+    p.append( Priors("obs_sigma",{"published_diff":(20,True,),"published":(30,True,),"deaths":(50,True)}) )  # This time around true if observation is fitted
+    
+    # Configure Startdate
+    startdate = datetime.date(2020,2,16)-datetime.timedelta(4)
+    mp = ModelParameters(startdate,onsets_per_date.shape[0]+4+1,p)
+    
+    initial = [7,9,8,10,5,0,4,13]+[0]*(mp.length-8)
+    imported_cases = np.asarray(initial,dtype=np.float64)
+    # Append Datasets to the Model
+    ds = Datasets()
+    ds.AddDataSeries("initial",imported_cases,mp.startdate)
+    ds.AddDataSeries("deaths",deaths,death_start)
+    ds.AddDataSeries("reported",reported,reported_start)
+    publishing_start = datetime.date(2020,3,4)  # Startdate of published epicurves
     onset_start = datetime.date(2020,2,16)    # Startdate of known onsets
-    ofront = (onset_start-mi.startdate).days        # 4
-    pfront = (publishing_start-mi.startdate).days   # 22
+    ds.AddDataSeries("onsets_per_date",onsets_per_date,(onsets_start,publisihing_start))
+    ds.AddDataSeries("onsets_per_date_diff",onsets_per_date_diff,(onsets_start,publisihing_start+datetime.timedelta(days=1)))
     
-    per_day_curves_dt = DelayDaily(per_day_curves_t[:mi.length,:mi.length],3,week_mask)
-    per_day_curves_s = tt.cumsum(per_day_curves_t,axis=1)
-    per_day_curves_tdt = per_day_curves_dt[ofront:ofront+onsets_per_date_diff.shape[0],pfront+1:pfront+onsets_per_date_diff.shape[1]+1] # 
+    trace = None
+    with pm.Model() as model:
     
-    pm.Deterministic("per_day_curve_t",per_day_curves_t)
-    pm.Deterministic("per_day_curve_dt",per_day_curves_dt)
-    pm.Deterministic("per_day_curve_s",per_day_curves_s)
-    
-    
-    
-    reported_t = tt.sum(per_day_curves_dt,axis=0)
-    pm.Deterministic("reported_t",reported_t)
-    
-    
-    if False:
-        sigma_onset_obs = pm.HalfCauchy( name="sigma_onset_obs", beta=50 )
-#        sigma_delayed_obs = pm.Lognormal(name="sigma_delayed_obs",mu=tt.log(10),sigma=.8)
-        pm.StudentT(
-                name="new_day_curve_studentT",
-                nu=4,
-                mu=per_day_curves_s[ofront:ofront+onsets_per_date.shape[0],pfront+onsets_per_date.shape[1]-1],
-#                sigma=tt.abs_(per_day_curves_s[4:-2,-2] + tt.alloc(1,per_day_curves_s.shape[1])) ** 0.5 * sigma_onset_obs,  # +1 and tt.abs to avoid nans
+        # Known working parameter Set: 1,.1 1,.1 t1=10,t2=24 offset=7 --> 2.53+/-0.050 / 0.99+/-0.070 
+        # 6,24 o7 --> 0.97+/-0.021 / 0.83+/-0.066
+        # a1 = pm.Lognormal(name="initial_a1",mu=1,sigma=.1)
+        # a2 = pm.HalfNormal(name="initial_a2",sigma=.3)
+        # t2 = pm.Lognormal(name="initial_t2",mu=tt.log(20),sigma=.1)
+        # imported_cases = GenInit(num_days_sim,a1,a2,t2=t2,offset=5)
+        # pm.Deterministic("initial_t",imported_cases)
+        #   s_import = 1.
+        #   s_import = pm.Lognormal(name="median_imported_factor",mu=tt.log(1.),sigma=.05)
         
-                sigma=tt.abs_(per_day_curves_s[ofront:ofront+onsets_per_date.shape[0],pfront+onsets_per_date.shape[1]-1] + 1) ** 0.5 * sigma_onset_obs,  # +1 and tt.abs to avoid nans
-                observed=onsets_per_date[:,-1]
-           )
-    if True:
-        # Diff-Obs
-        sigma_onset_diff_obs = pm.HalfCauchy( name="sigma_onset_diff_obs", beta=30 )
-        pm.StudentT(
-                name="new_day_curve_diff_studentT",
-                nu=4,
-                mu=per_day_curves_tdt,
-                sigma=tt.abs_(per_day_curves_tdt + tt.alloc(1,per_day_curves_tdt.shape[1])) ** 0.5 * sigma_onset_diff_obs,  # +1 and tt.abs to avoid nans
-                observed=onsets_per_date_diff
-           )
+        
+        # Setup R_eff_0 and sigma of the random-walk
+        R_eff = mp["R_eff"]
+        R_eff_0,pr,prn = R_eff["0"]
+        if pr:
+            sigma,_,_ = R_eff["0_s"]
+            R_eff_0 = pm.Lognormal( name=prn,mu=np.log(R_eff_0),sigma =sigma )
+        sigma_rw,_,_ = R_eff["rw_s"]
+        
+        # Weekend effect 1: R_eff weekend factor
+        w1 = mp["W1"]
+        f_weekend,pr,prn = w1["factor"]
+        if pr:
+            sigma,_,_ = w1["sigma"]
+            f_weekend = pm.Lognormal( name=prn,mu=tt.log(f_weekend),sigma=.1 )
+        sigma_rw,pr,prn = R_eff["rw_s"]
+        R_eff_t,week_mask = DailyRandomWalkWeekend(R_eff.name+"_t",mp.length,R_eff_0,sigma_rw,f_weekend,offset=mp.weekoffset)
+        pm.Deterministic("R_eff_r",R_eff_t)
+        
+        # Delay Ratio between early and late reporting
+        delay_ratio = mp["delay_ratio"]
+        dlr0,pr,prn = delay_ratio["0"]  # Delay_ratio_0
+        if pr:
+            dlr0s,_,_ = delay_ratio["0_s"]
+#            dlr0 = pm.TruncatedNormal( name=prn,mu=dlr0,sigma=dlr0s,lower=.01,upper=.99 )
+            dlr0 = pm.Uniform(name=prn,lower=.01,upper=.99)
+        flt,_,_ = delay_ratio["flt"]
+        delay_ratio_t = WeeklyRandomWalk(delay_ratio.name+"_t",mp.length,dlr0,sigma=delay_ratio["sigma"][0],flt=flt,offset=mp.weekoffset,shorten=delay_ratio["const_end"][0])
+        
+        delay_ratio_t = tt.clip(delay_ratio_t,.01,.99)
+        pm.Deterministic(delay_ratio.name+"_t",delay_ratio_t)
+        
+        # Core Function: SEIR , infectious and incubation --> infected_t , onsets_of_illness_t [seems to be the problem]
+        infectious = mp["infectious"]
+        inf_m,pr,prn = infectious["mu"]
+        if pr:
+            inf_m = pm.Lognormal(name =prn ,mu = tt.log(inf_m),sigma = infectious["m_s"][0])
+        inf_s,pr,prn = infectious["sigma"]
+        if pr:
+            inf_s = pm.Lognormal(name=prn,mu=tt.log(inf_s),sigma=infectious["sigma_s"][0])
+        infected_t,infected_v,N_t = SEIR_model(86e6,imported_cases[:mp.length],R_eff_t[:mp.length],inf_m,inf_s,l=32)
+        pm.Deterministic("infected_t",infected_t)
+        
+        # Delay infected --> onsets
+        incubation = mp["incubation"]
+        inc_m,pr,prn = incubation["mu"]
+        if pr:
+            inc_m = pm.Lognormal(name = prn,mu = tt.log(inc_m),sigma = incubation["m_s"][0])
+        inc_s,pr,prn = incubation["sigma"]
+        if pr:
+            inc_s = pm.Lognormal(name = prn,mu=tt.log(inc_s),sigma= incubation["sigma_s"][0])
+        onset_of_illness_t = DelayLognormal(infected_t,median=inc_m,sigma=inc_s,factor=1.,l=32)[:mp.length]
+        pm.Deterministic("onset_of_illness_t",onset_of_illness_t)
+        
+        # Weekend effect 2: sat/sun --> mon for onsets reported
+        w2 = mp["W2"]
+        f_wtrans,pr,prn = w2["0"]
+        if pr:
+            f_wtrans = pm.HalfCauchy(name=prn,beta=w2["beta"][0])
+        reported_onset_of_illness_t = TransferWeekendReported(onset_of_illness_t,f_wtrans,week_mask)
+        pm.Deterministic("reported_onset_of_illness_t",reported_onset_of_illness_t)
+        
+        # Reporting Delay
+        delay = mp["reporting_delay"]
+        d = {}
+        for k,v in delay.p.items():
+            val,pr,prn = delay[k]
+            d[k] = val
+            print(k,v)
+            if pr:
+                if "mu" in k:
+                    d[k] = pm.Lognormal(name=prn,mu=tt.log(val),sigma=.2)
+                else:
+                    d[k] = pm.HalfNormal(name=prn,sigma=val)
+        per_day_curves_t = reportDelayDistFunc(reported_onset_of_illness_t[:mp.length],d["mu1"],d["s1"],d["mu2"],d["s2"],delay_ratio_t,n=128)
+        
+        # Format Observation and estimated data
+        ofront = (onset_start-mp.startdate).days        # onsets-axis (observation-axis)
+        pfront = (publishing_start-mp.startdate).days   # publication-axis
+        
+        # W3 effects
+        w3 = mp["W3"]
+        n_days,w3_m,w3_s = w3["n"],w3["mu"],w3["sigma"]
+        per_day_curves_dt = DelayDaily(per_day_curves_t[:mp.length,:mp.length],n_days[0],week_mask,w3_m[0],w3_s[0])
+        per_day_curves_s = tt.cumsum(per_day_curves_t,axis=1)
+        per_day_curves_tdt = per_day_curves_dt[ofront:ofront+onsets_per_date_diff.shape[0],pfront+1:pfront+onsets_per_date_diff.shape[1]+1] # diff is shifted by one observation, as length is 1 shorter
+        
+        pm.Deterministic("per_day_curve_t",per_day_curves_t)
+        pm.Deterministic("per_day_curve_dt",per_day_curves_dt)
+    #    pm.Deterministic("per_day_curve_s",per_day_curves_s)
+        
+        # Generate reported_t as sum along publication-axis
+        reported_t = tt.sum(per_day_curves_dt,axis=0)
+        pm.Deterministic("reported_t",reported_t)
+        
+        
+        obs = mp["obs_sigma"]
+        obs_p,obs_pd,obs_death = obs["published"],obs["published_diff"],obs["deaths"]
+        if obs_p[1]:
+            sigma_onset_obs = pm.HalfCauchy( name=obs_p[2], beta=obs_p[0] )
+            pm.StudentT(
+                    name="new_day_curve_studentT",
+                    nu=4,
+                    mu=per_day_curves_s[ofront:ofront+onsets_per_date.shape[0],pfront+onsets_per_date.shape[1]-1],
+                    sigma=tt.abs_(per_day_curves_s[ofront:ofront+onsets_per_date.shape[0],pfront+onsets_per_date.shape[1]-1] + 1) ** 0.5 * sigma_onset_obs,  # +1 and tt.abs to avoid nans
+                    observed=onsets_per_date[:,-1]
+               )
+        if obs_pd[1]:
+            sigma_onset_diff_obs = pm.HalfCauchy( name=obs_pd[2], beta=obs_pd[0] )
+            pm.StudentT(
+                    name="new_day_curve_diff_studentT",
+                    nu=4,
+                    mu=per_day_curves_tdt,
+                    sigma=tt.abs_(per_day_curves_tdt + tt.alloc(1,per_day_curves_tdt.shape[1])) ** 0.5 * sigma_onset_diff_obs,  # +1 and tt.abs to avoid nans
+                    observed=onsets_per_date_diff
+               )
+        	   
+        # if False:
+       #      initial_coverage = pm.Lognormal("coverage_0",mu=tt.log(.9),sigma=.1)
+       #      coverage_t = WeeklyRandomWalk("coverage_t",mp.length,initial_coverage,sigma=.01,flt=np.array([.5,1,1,1,1,1,.5],dtype=np.float64),offset=mp.weekoffset,shorten=0)
+       #      r_offset = (reported_start-mp.startdate).days
+       #      ureported_t = coverage_t*reported_t
+       #      sigma_reported_obs = pm.HalfCauchy( name="sigma_reorted_obs",beta=10 )
+       #      pm.StudentT(
+       #              name="new_reported_cases_studentT",
+       #              nu=4,
+       #              mu=ureported_t[r_offset:r_offset+len(reported)],
+       #              sigma=tt.abs_(ureported_t[r_offset:r_offset+len(reported)] + 1) ** 0.5 * sigma_reported_obs,  # +1 and tt.abs to avoid nans
+       #              observed=reported
+       #          )
+       #      pm.Deterministic("coverage_t",coverage_t)
+        
+    #     if False:
+    #         m_hosp,s_hosp,f_hosp = 14,1.5,.22
+    #         f_hosp = pm.Lognormal(name="f_hospital",mu=tt.log(f_hosp),sigma=.01)
+    #         m_hosp = pm.Normal(name="m_hospital",mu=m_hosp,sigma=1.)
+    # #        s_hosp = pm.HalfNormal(name="s_hospital",sigma=s_hosp) # Greatly slows down the
+    #         hospital_t = DelayLognormal(infected_t,median=m_hosp,sigma=s_hosp,factor=f_hosp,l=36)[hospital_begin:num_days_sim]
+    #         sigma_obs_hospital = pm.HalfCauchy( name="sigma_obs_hospital", beta=10 )
+    #         pm.StudentT(
+    #                 name="new_hospital_studentT",
+    #                 nu=4,
+    #                 mu=hospital_t,
+    #                 sigma=tt.abs_(hospital_t+.5) ** 0.5*sigma_obs_hospital,
+    #                 observed=hospital[:(num_days_sim-hospital_begin)]
+    #             )
+    #         pm.Deterministic("hosp_t",hospital_t)
+        
+        if obs_death[1]:
+            # Generate Deaths
+            deathp = mp["deaths"]
+            f_death,pr,prn = deathp["factor"]
+            if pr:
+                f_death = pm.Normal(name=prn,mu=f_death,sigma=deathp["factor_s"][0])
+            m_death,pr,prn = deathp["mu"]
+            if pr:
+                m_death = pm.Normal(name=prn,mu=m_death,sigma=deathp["mu_s"][0])
+            s_death,pr,prn = deathp["sigma"]
+            if pr:
+                s_death = pm.Lognormal(name=prn,mu=tt.log(s_death),sigma=deathp["sigma_s"][0])
+            dead_t = DelayLognormal(infected_t,median=m_death,sigma=s_death,factor=f_death,l=64)[:mp.length+30]
+            
+            sigma_obs_dead = pm.HalfCauchy( name=obs_death[2], beta=obs_death[0] )
+            d_offset = (death_start-mp.startdate).days  # Offset of observation
+            pm.StudentT(
+                    name="new_deaths_studentT",
+                    nu=4,
+                    mu=dead_t[d_offset:d_offset+len(deaths)],
+                    sigma=tt.abs_(dead_t[d_offset:d_offset+len(deaths)]+1) ** 0.5*sigma_obs_dead,
+                    observed=deaths
+                )
+            pm.Deterministic("dead_t",dead_t)
     
-    # if False:
-    #     sigma_reported_obs = pm.HalfCauchy( name="sigma_reorted_obs",beta=10 )
-    #     pm.StudentT(
-    #             name="new_reported_cases_studentT",
-    #             nu=4,
-    #             mu=onset_of_illness_t[5:-12],
-    #             sigma=tt.abs_(onset_of_illness_t[5:-11] + 1) ** 0.5 * sigma_reported_obs,  # +1 and tt.abs to avoid nans
-    #             observed=reported
-    #         )
+    # Run Sampler
+    ps = mp["sampler"]
+    trace = pm.sample( model=model,init=ps.init,draws=ps.draws,cores=ps.draws,chains=ps.chains,tune=ps.tune,n_init=ps.n_init,max_treedepth=ps.max_treedepth	)
     
-#     if False:
-#         m_hosp,s_hosp,f_hosp = 14,1.5,.22
-#         f_hosp = pm.Lognormal(name="f_hospital",mu=tt.log(f_hosp),sigma=.01)
-#         m_hosp = pm.Normal(name="m_hospital",mu=m_hosp,sigma=1.)
-# #        s_hosp = pm.HalfNormal(name="s_hospital",sigma=s_hosp) # Greatly slows down the
-#         hospital_t = DelayLognormal(infected_t,median=m_hosp,sigma=s_hosp,factor=f_hosp,l=36)[hospital_begin:num_days_sim]
-#         sigma_obs_hospital = pm.HalfCauchy( name="sigma_obs_hospital", beta=10 )
-#         pm.StudentT(
-#                 name="new_hospital_studentT",
-#                 nu=4,
-#                 mu=hospital_t,
-#                 sigma=tt.abs_(hospital_t+.5) ** 0.5*sigma_obs_hospital,
-#                 observed=hospital[:(num_days_sim-hospital_begin)]
-#             )
-#         pm.Deterministic("hosp_t",hospital_t)
-#
-    if False:
-        m_death,s_death,f_death = 25,.4,.04
-        f_death = pm.Normal(name="f_death",mu=f_death,sigma=.01)
-        m_death = pm.Normal(name="m_death",mu=m_death,sigma=1.)
-      #  s_death = pm.Lognormal(name="s_death",mu=tt.log(.5),sigma=.1)
-        dead_t = DelayLognormal(infected_t,median=m_death,sigma=s_death,factor=f_death,l=42)[:num_days_sim]
-        sigma_obs_dead = pm.HalfCauchy( name="sigma_obs_dead", beta=10 )
-        pm.StudentT(
-                name="new_deaths_studentT",
-                nu=4,
-                mu=dead_t,
-                sigma=tt.abs_(dead_t+.5) ** 0.5*sigma_obs_dead,
-                observed=deaths[:num_days_sim]
-            )
-        pm.Deterministic("dead_t",dead_t)
-#
-#     if False:
-#         m_ICU_death,s_ICU_death,f_ICU_death = 10,.5,.1
-#         f_ICU_death = pm.Normal(name="f_ICU_death",mu=f_death,sigma=.01)
-#         m_ICU_death = pm.Normal(name="m_ICU_death",mu=m_death,sigma=1.5)
-#         #  s_death = pm.Lognormal(name="s_death",mu=tt.log(.5),sigma=.1)
-#         ICU_dead_t = DelayLognormal(hospital_t,median=m_ICU_death,sigma=s_ICU_death,factor=f_ICU_death,l=24)[icu_deaths_begin:num_days_sim]
-#         sigma_obs_ICU_dead = pm.HalfCauchy( name="sigma_obs_ICU_dead", beta=10 )
-#         pm.StudentT(
-#                 name="new_ICU_deaths_studentT",
-#                 nu=4,
-#                 mu=ICU_dead_t,
-#                 sigma=tt.abs_(ICU_dead_t+.5) ** 0.5*sigma_obs_ICU_dead,
-#                 observed=icu_deaths[:(num_days_sim-icu_deaths_begin)]
-#             )
-#         pm.Deterministic("ICU_dead_t",ICU_dead_t)
-
-#    model.profile(model.logpt).summary()
-#    model.profile(gradient(model.logpt, model.vars)).summary()
-
-#init='advi'
-#'advi+adapt_diag'
-#init='advi+adapt_diag' 
-#trace = pm.sample(model=model,init='advi+adapt_diag',draws=300,cores=2,chains=2,tune=300,n_init=1000000,max_treedepth=12)
-trace = pm.sample(model=model,draws=400,cores=2,chains=2,tune=500,max_treedepth=11)
-
-if trace != None:
-    d = datetime.datetime.now()
-    dn = "%02d%02d%02d"%(d.hour,d.minute,d.second)
-    fn = "traces/trace"+dn+".dat"
-
-    with open(fn,"wb+") as f:
-        pickle.dump(trace,f)
-        pickle.dump(mi,f)
-        pickle.dump(ds,f)
+    # Export Parameters,Results and Datasets
+    if trace != None:
+        d = datetime.datetime.now()
+        dn = "%04d%02d%02d_%02d%02d%02d_%s"%(d.year,d.month,d.day,d.hour,d.minute,d.second,collection_id_str)
+        fn = "traces/trace"+dn+".dat"
+    
+        with open(fn,"wb+") as f:
+            pickle.dump(mp,f)
+            pickle.dump(trace,f)
+            pickle.dump(ds,f)
