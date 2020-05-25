@@ -12,6 +12,7 @@ import pymc3 as pm
 
 import pickle
 import datetime
+from time import time
 from ModelInfo import ModelParameters,Datasets,SamplerParameters,Priors,ModelParameter
 
 import matplotlib.pyplot as plt
@@ -268,9 +269,8 @@ def reportDelayDistFunc(cases,mu1,sig1,mu2,sig2,r,n):
     cfo = (sr*cf1.T + (tt.ones_like(sr)-sr)*cf2.T).T
     return cfo#
 
-def conv_offset(inp,filt,amplitude=1.):
-    # Ok - minus the offset...
-#    offset = tt.cast(offset,'int64')
+def conv_factor(inp,filt,amplitude=1.):
+    """ wraps theano conv2d function """
     amplitude = tt.cast(amplitude,'float64')
     amplitude = tt.clip(amplitude,1e-12,1e9) # Limit to prevent NANs
     
@@ -284,10 +284,11 @@ def conv_offset(inp,filt,amplitude=1.):
     filt = tt.set_subtensor(filt3d[0,:,0],filt)
     return tt_conv.conv2d(a0rp,filt,None,None,border_mode='full').flatten()
     
-def DelayLognormal(infected_t,median,sigma,factor,l=40):
+def DelayLognormal(inp,median,sigma,factor,l=40):
+    """ Delays input inp by lognormal distirbution using convolution """
     l = tt.cast(l,'int64')
     beta = tt_lognormal(tt.arange(l*2),tt.log(median),sigma)
-    return conv_offset(infected_t,beta,factor)
+    return conv_factor(inp,beta,factor)
     
 # def conv_offset(inp,filt,amplitude=1,offset=0):
 #     offset = tt.cast(offset,'int64')
@@ -397,10 +398,13 @@ def WeeklyRandomWalkWeekend(name,n,initial,wfactor,flt=np.array([.05,.1,.7,.1,.0
     return daily_walk,week_mask
 
 def DailyRandomWalkWeekend(name,n,initial,sigma,wfactor,offset=0):
-    
+    """Generate a random-walk with an estimated value for every day.
+    'step-size' is constrained by sigma.
+    wfactor allows a separate multiplicative weekend offset for all weekends, W1 effect.
+    Generates a 7x(n days) matrix indicating weekday."""
+
     rw_list = []
     rw_list.append(tt.log(initial))
-#    rw_list.append(initial)
     # Generate "stepsize"
     sigma_random_walk = pm.HalfNormal(name=name+"_sigma_random_walk", sigma=sigma)
     random_walk = pm.distributions.timeseries.GaussianRandomWalk(
@@ -485,7 +489,7 @@ def DailyRandomWalkWeekend(name,n,initial,sigma,wfactor,offset=0):
 #     return lambda_t_with_sigmoids(change_points,)
 
 def TransferWeekendReported(I_t,f,mask):
-    """ Moves f* value at I_t to I_t+2 / I_t+1 on saturdays and sundays """
+    """ Moves f* value at I_t to I_t+2 / I_t+1 on saturdays and sundays W2 effect """
     sat = I_t * mask[5] * f # Tranasfer monday cases
     sut = I_t * mask[6] * f
     I_t = I_t - sat - sut   # Substract the transfered cases
@@ -497,14 +501,13 @@ def TransferWeekendReported(I_t,f,mask):
     return I_t
     
 def DelayDaily(data,max_delay,week_mask,mu=.01,sigma=.03):
-    """ Delay Cases from one day to the next by weekdayfactor """
+    """ Delay Cases from one day to the next(+2/+3 days) by weekdayfactor, realizes W3 effect."""
     # Checked the DelayDaily effect manually, aligns properly with weekdays, no more overspill at front.
+    # TODO: change to a commulative style, that way no 1+2 / 1+2+3 shifts can occur
     
 #    factor = pm.TruncatedNormal(name="d_factor",mu=.1,sigma=.1,lower=-1,upper=1,shape=(max_delay,7,))
     factor = pm.TruncatedNormal(name="d_factor",mu=mu,sigma=sigma,lower=0,upper=1,shape=(max_delay,7,))
-    
-#    factor=np.array([[.8,0,0,0,0,0,0],[0,0,0,0,0,0,.8]],dtype=np.float64)
-    
+        
     cuml = tt.alloc(0,max_delay,week_mask.shape[1],data.shape[1])
     
     t = tt.dot(factor[0],week_mask)
@@ -539,32 +542,30 @@ def DelayDaily(data,max_delay,week_mask,mu=.01,sigma=.03):
     
     return d_add
 
-def SEIR_model(N, imported_t,Reff_t, median_incubation,sigma_incubation,l=32):
+def SEIR_model(N, imported_t,R_eff_t, median_incubation,sigma_incubation,l=32):
+    """ SEI(R) Model to generate timeseries of infected.
+    No recoveries are considered, infections occur lognormal-weighted over serial intervall with factor R_eff_t
+    Exposed are updated as well."""
     N = tt.cast(N,'float64')
     beta = tt_lognormal(tt.arange(l), tt.log(median_incubation), sigma_incubation)
     
-    # Dirty hack to prevent nan - seems not needed if priors are better
- #   beta = tt.alloc(0,l)
-  #  beta = tt.set_subtensor(beta[tt.clip(tt.cast(median_incubation,'int32'),1,l-2)],1)
-     
-    Reff_t = tt.as_tensor_variable(Reff_t)
+    Reff_t = tt.as_tensor_variable(R_eff_t)
     imported_t = tt.as_tensor_variable(imported_t)
 
     def new_day(Reff_at_t,imported_at_t,infected,E_t,beta,N):
         f = E_t / N
-     #   f = 1
         new = imported_at_t + theano.dot(infected,beta) * Reff_at_t * f
         new = tt.clip(new,0,N)
      
         infected = tt.roll(infected,1,0)
         infected = tt.set_subtensor(infected[:1],new,inplace=False)
         E_t = tt.clip(E_t-new,0,E_t)
-#        E_t = E_t-new
         return new,infected,E_t
     
+    # Loop over all imported_t and R_eff_t calculating new exposed and infected using new_day
     outputs_info = [None,np.zeros(l),N]
     infected_t,updates = theano.scan(fn=new_day,
-                                     sequences=[Reff_t,imported_t],
+                                     sequences=[R_eff_t,imported_t],
                                      outputs_info=outputs_info,
                                      non_sequences=[beta,N],
                                      profile=False)
@@ -592,8 +593,8 @@ reported_start = datetime.date(2020,3,4)
 reported = [66,138,239,156,107,237,157,271,802,693,733,400,1817,1144,1036,2807,2958,2705,1948,4062,4764,4118,4954,5780,6294,3965,4751,4615,5453,6156,6174,6082,5936,3677,3834,4003,4974,5323,4133,2821,2537,2082,2486,2866,3380,3609,2458,1775,1785,2237,2352,2337,2055,1737,1018,1144,1304,1478,1639,945,793,679,685,947,1284,1209,1251,667,357,933,798,933,913,620]
 
 # ID
-collection_id = datetime.timestamp()
-collection_id_str = "%04d"%collection_id%10000
+collection_id = int(time())
+collection_id_str = "%04d"%(collection_id%10000)
 # R_eff 0.002 is too strict, 0.005 also distortes infectious, 0.01 works good
 
 #for R_eff_rw_s in [0.1,.05,.02,.01,.005]:
@@ -630,25 +631,14 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
     ds.AddDataSeries("deaths",deaths,death_start)
     ds.AddDataSeries("reported",reported,reported_start)
     publishing_start = datetime.date(2020,3,4)  # Startdate of published epicurves
-    onset_start = datetime.date(2020,2,16)    # Startdate of known onsets
-    ds.AddDataSeries("onsets_per_date",onsets_per_date,(onsets_start,publisihing_start))
-    ds.AddDataSeries("onsets_per_date_diff",onsets_per_date_diff,(onsets_start,publisihing_start+datetime.timedelta(days=1)))
+    onsets_start = datetime.date(2020,2,16)    # Startdate of known onsets
+    ds.AddDataSeries("onsets_per_date",onsets_per_date,(onsets_start,publishing_start))
+    ds.AddDataSeries("onsets_per_date_diff",onsets_per_date_diff,(onsets_start,publishing_start+datetime.timedelta(days=1)))
     
     trace = None
     with pm.Model() as model:
-    
-        # Known working parameter Set: 1,.1 1,.1 t1=10,t2=24 offset=7 --> 2.53+/-0.050 / 0.99+/-0.070 
-        # 6,24 o7 --> 0.97+/-0.021 / 0.83+/-0.066
-        # a1 = pm.Lognormal(name="initial_a1",mu=1,sigma=.1)
-        # a2 = pm.HalfNormal(name="initial_a2",sigma=.3)
-        # t2 = pm.Lognormal(name="initial_t2",mu=tt.log(20),sigma=.1)
-        # imported_cases = GenInit(num_days_sim,a1,a2,t2=t2,offset=5)
-        # pm.Deterministic("initial_t",imported_cases)
-        #   s_import = 1.
-        #   s_import = pm.Lognormal(name="median_imported_factor",mu=tt.log(1.),sigma=.05)
         
-        
-        # Setup R_eff_0 and sigma of the random-walk
+        # Setup R_eff_0 and sigma of the random-walk / Markov-chain
         R_eff = mp["R_eff"]
         R_eff_0,pr,prn = R_eff["0"]
         if pr:
@@ -679,7 +669,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
         delay_ratio_t = tt.clip(delay_ratio_t,.01,.99)
         pm.Deterministic(delay_ratio.name+"_t",delay_ratio_t)
         
-        # Core Function: SEIR , infectious and incubation --> infected_t , onsets_of_illness_t [seems to be the problem]
+        # Core Function: SEI(R) , infectious and incubation --> infected_t , onsets_of_illness_t [seems to be the problem]
         infectious = mp["infectious"]
         inf_m,pr,prn = infectious["mu"]
         if pr:
@@ -688,7 +678,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
         if pr:
             inf_s = pm.Lognormal(name=prn,mu=tt.log(inf_s),sigma=infectious["sigma_s"][0])
         infected_t,infected_v,N_t = SEIR_model(86e6,imported_cases[:mp.length],R_eff_t[:mp.length],inf_m,inf_s,l=32)
-        pm.Deterministic("infected_t",infected_t)
+        pm.Deterministic("infected_t",infected_t)   # infected_t is estimated time-series of newly infected
         
         # Delay infected --> onsets
         incubation = mp["incubation"]
@@ -724,10 +714,10 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
         per_day_curves_t = reportDelayDistFunc(reported_onset_of_illness_t[:mp.length],d["mu1"],d["s1"],d["mu2"],d["s2"],delay_ratio_t,n=128)
         
         # Format Observation and estimated data
-        ofront = (onset_start-mp.startdate).days        # onsets-axis (observation-axis)
+        ofront = (onsets_start-mp.startdate).days        # onsets-axis (observation-axis)
         pfront = (publishing_start-mp.startdate).days   # publication-axis
         
-        # W3 effects
+        # W3 effects, per day
         w3 = mp["W3"]
         n_days,w3_m,w3_s = w3["n"],w3["mu"],w3["sigma"]
         per_day_curves_dt = DelayDaily(per_day_curves_t[:mp.length,:mp.length],n_days[0],week_mask,w3_m[0],w3_s[0])
@@ -743,6 +733,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
         pm.Deterministic("reported_t",reported_t)
         
         
+        # Fit Observations
         obs = mp["obs_sigma"]
         obs_p,obs_pd,obs_death = obs["published"],obs["published_diff"],obs["deaths"]
         if obs_p[1]:
@@ -763,40 +754,9 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
                     sigma=tt.abs_(per_day_curves_tdt + tt.alloc(1,per_day_curves_tdt.shape[1])) ** 0.5 * sigma_onset_diff_obs,  # +1 and tt.abs to avoid nans
                     observed=onsets_per_date_diff
                )
-        	   
-        # if False:
-       #      initial_coverage = pm.Lognormal("coverage_0",mu=tt.log(.9),sigma=.1)
-       #      coverage_t = WeeklyRandomWalk("coverage_t",mp.length,initial_coverage,sigma=.01,flt=np.array([.5,1,1,1,1,1,.5],dtype=np.float64),offset=mp.weekoffset,shorten=0)
-       #      r_offset = (reported_start-mp.startdate).days
-       #      ureported_t = coverage_t*reported_t
-       #      sigma_reported_obs = pm.HalfCauchy( name="sigma_reorted_obs",beta=10 )
-       #      pm.StudentT(
-       #              name="new_reported_cases_studentT",
-       #              nu=4,
-       #              mu=ureported_t[r_offset:r_offset+len(reported)],
-       #              sigma=tt.abs_(ureported_t[r_offset:r_offset+len(reported)] + 1) ** 0.5 * sigma_reported_obs,  # +1 and tt.abs to avoid nans
-       #              observed=reported
-       #          )
-       #      pm.Deterministic("coverage_t",coverage_t)
-        
-    #     if False:
-    #         m_hosp,s_hosp,f_hosp = 14,1.5,.22
-    #         f_hosp = pm.Lognormal(name="f_hospital",mu=tt.log(f_hosp),sigma=.01)
-    #         m_hosp = pm.Normal(name="m_hospital",mu=m_hosp,sigma=1.)
-    # #        s_hosp = pm.HalfNormal(name="s_hospital",sigma=s_hosp) # Greatly slows down the
-    #         hospital_t = DelayLognormal(infected_t,median=m_hosp,sigma=s_hosp,factor=f_hosp,l=36)[hospital_begin:num_days_sim]
-    #         sigma_obs_hospital = pm.HalfCauchy( name="sigma_obs_hospital", beta=10 )
-    #         pm.StudentT(
-    #                 name="new_hospital_studentT",
-    #                 nu=4,
-    #                 mu=hospital_t,
-    #                 sigma=tt.abs_(hospital_t+.5) ** 0.5*sigma_obs_hospital,
-    #                 observed=hospital[:(num_days_sim-hospital_begin)]
-    #             )
-    #         pm.Deterministic("hosp_t",hospital_t)
-        
+      
         if obs_death[1]:
-            # Generate Deaths
+            # Generate Deaths with lognormal delay from the infectectd_t, median, sigma and mortality factor can be estimated 
             deathp = mp["deaths"]
             f_death,pr,prn = deathp["factor"]
             if pr:
@@ -810,7 +770,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
             dead_t = DelayLognormal(infected_t,median=m_death,sigma=s_death,factor=f_death,l=64)[:mp.length+30]
             
             sigma_obs_dead = pm.HalfCauchy( name=obs_death[2], beta=obs_death[0] )
-            d_offset = (death_start-mp.startdate).days  # Offset of observation
+            d_offset = (death_start-mp.startdate).days  # Offset of observations
             pm.StudentT(
                     name="new_deaths_studentT",
                     nu=4,
