@@ -241,7 +241,9 @@ def GenInit(l,a1,a2,t1=10,t2=27,offset=8):
 #     return ds,mcc,dist
 
 def reportDelayDistFunc(cases,mu1,sig1,mu2,sig2,r,n):
-    """ from onset of illnesses 'cases', generate a time series for every day of onset of illness representing when the cases are reported. """
+    """ from onset of illnesses 'cases', generate a time series for every day of onset of illness representing when the cases are reported.
+        two distributions are blended together based on ration
+    """
     m1 = tt.cast(mu1,'float64')
     s1 = tt.cast(sig1,'float64')
     m2 = tt.cast(mu2,'float64')
@@ -585,6 +587,8 @@ with open("data/onsets_by_date_diff.pickle","rb") as f:
     print("onsets_diff",onsets_per_date_diff.shape)
 
 deaths = [1, 2, 1, 1, 4, 2, 3, 4, 11, 12, 12, 21, 39, 24, 41, 40, 65, 75, 92, 102, 107, 115, 170, 161, 161, 201, 195, 221, 234, 241, 248, 255, 252, 235, 239, 235, 237, 242, 220, 234, 231, 183, 205, 205, 168, 189, 149, 158, 123, 140, 125, 122, 124, 118, 100, 75, 91, 77, 85, 75, 57, 55, 58, 60, 60, 40, 45, 48, 40, 24, 29, 34, 30, 33, 20, 11, 3]
+deaths = [1, 2, 1, 1, 4, 2, 3, 4, 11, 12, 12, 21, 39, 24, 41, 40, 65, 75, 92, 102, 107, 115, 170, 162, 162, 201, 195, 221, 234, 241, 248, 255, 252, 235, 239, 235, 237, 242, 220, 234, 231, 183, 205, 205, 168, 189, 149, 158, 123, 140, 125, 122, 124, 118, 100, 75, 91, 77, 85, 75, 57, 55, 58, 60, 60, 40, 45, 50, 40, 24, 29, 35, 30, 34, 20, 13, 6]
+
 
 deaths = np.asarray(deaths,dtype=np.float64)
 death_start = datetime.date(2020,3,8)
@@ -607,8 +611,8 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
     p.append( Priors("R_eff",{"0":(2.7,False),"0_s":(.3,False),"rw_s":(R_eff_rw_s,False)}) )  # rw_s : Random walk sigma
     
     p.append( Priors("W1",{"factor":(1.,False),"factor_s":(.05,False)}) )   # Weekend-factor for R_eff
-    p.append( Priors("W2",{"0":(.08,False),"beta":(.3,True)}) )               # sat/sun --> monday shift of reported onsets
-    p.append( Priors("W3",{"n":(2,False),"mu":(.01,False),"sigma":(.01,False)}) )   # per weekday delay of reporting by n days 
+    p.append( Priors("W2",{"0":(.08,True),"beta":(.1,False)}) )               # sat/sun --> monday shift of reported onsets
+    p.append( Priors("W3",{"n":(2,False),"mu":(.01,False),"sigma":(.05,False)}) )   # per weekday delay of reporting by n days 
     p.append( Priors("reporting_delay",{"mu1":(8,True),"s1":(.4,True),"mu2":(21,False),"s2":(.5,True)}) )
     
     p.append( Priors("delay_ratio",{"0":(.3,False),"0_s":(.1,False),"sigma":(0.01,False),"const_end":(5,False),"flt":(np.array([.5,1,1,1,1,1,.5],dtype=np.float64),False)})) # Delay Ratio and filter
@@ -617,7 +621,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
     p.append( Priors("deaths",{"mu":(23,True),"mu_s":(1.,False),"sigma":(.5,True),"sigma_s":(.1,False),"factor":(.04,True),"factor_s":(.01,False)}) )
     
 #    p.append( Priors("sigma_obs",{"published_diff":(20,True,),"published":(20,True,),"deaths":(10,True)}) )  # This time around true if observation is fitted
-    p.append( Priors("obs_sigma",{"published_diff":(20,True,),"published":(30,True,),"deaths":(50,True)}) )  # This time around true if observation is fitted
+    p.append( Priors("obs_sigma",{"published_diff":(10,True,),"published":(30,True,),"deaths":(50,True)}) )  # This time around true if observation is fitted
     
     # Configure Startdate
     startdate = datetime.date(2020,2,16)-datetime.timedelta(4)
@@ -654,7 +658,7 @@ for R_eff_rw_s in [.1,.05,.02,.01,.005]:
             f_weekend = pm.Lognormal( name=prn,mu=tt.log(f_weekend),sigma=.1 )
         sigma_rw,pr,prn = R_eff["rw_s"]
         R_eff_t,week_mask = DailyRandomWalkWeekend(R_eff.name+"_t",mp.length,R_eff_0,sigma_rw,f_weekend,offset=mp.weekoffset)
-        pm.Deterministic("R_eff_r",R_eff_t)
+        pm.Deterministic("R_eff_t",R_eff_t)
         
         # Delay Ratio between early and late reporting
         delay_ratio = mp["delay_ratio"]
